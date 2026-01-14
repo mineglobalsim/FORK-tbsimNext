@@ -25,6 +25,13 @@ from .comorbidities.hiv.tb_hiv_cnn import *
 from .comorbidities.malnutrition.tb_malnut_cnn import TB_Nutrition_Connector
 from .analyzers import DwtAnalyzer, DwtPlotter, DwtPostProcessor
 from .utils.plots import *
+from .utils.demographics import (
+    load_demographic_data,
+    create_age_distribution,
+    create_sex_distribution,
+    validate_demographics,
+    create_people_from_demographics,
+)
 from .wrappers import Agents
 from .misc.tbterms import TBTerms, TermsExport
 from .people import TBPeople
