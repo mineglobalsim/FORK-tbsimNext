@@ -398,3 +398,164 @@ class TBPeople(ss.People):
         """
         # Return the class-level TB states definition
         return cls.TB_STATES
+    
+    @classmethod
+    def from_demographics(cls, filepath, n_agents=None, scale_factor=1.0, 
+                         method='exact', extra_states=None, **kwargs):
+        """
+        Create TBPeople from demographic CSV file.
+        
+        This classmethod provides a convenient way to initialize a TBPeople instance
+        with realistic age-sex distributions from demographic data files. The method
+        supports two initialization approaches:
+        
+        1. 'exact' method: Creates precise age-sex distribution matching CSV data
+        2. 'starsim' method: Uses Starsim's distribution sampling
+        
+        Parameters
+        ----------
+        filepath : str
+            Path to demographic data CSV file with columns:
+            age_min, age_max, male_count, female_count
+        n_agents : int, optional
+            Number of agents. If None, calculated from CSV data.
+        scale_factor : float, default=1.0
+            Factor to scale the population (1.0 = use counts as-is, 0.1 = 10% of size)
+        method : str, default='exact'
+            Initialization method:
+            - 'exact': Precise age-sex matching (recommended for calibration)
+            - 'starsim': Distribution-based sampling (for demographic uncertainty)
+        extra_states : list, optional
+            Additional custom states beyond the default 24 TB states
+        **kwargs
+            Additional arguments passed to TBPeople constructor
+            
+        Returns
+        -------
+        TBPeople
+            Initialized TBPeople instance with demographic structure.
+            Note: Returned object is not yet linked to a simulation.
+            Use sim.init() or sim = ss.Sim(people=people) to link it.
+            
+        Raises
+        ------
+        FileNotFoundError
+            If the demographic file does not exist
+        ValueError
+            If the CSV file is missing required columns
+            
+        Notes
+        -----
+        For 'exact' method:
+        - Ages and sexes are set after initialization via people.init_vals()
+        - Each age-sex group matches CSV counts precisely
+        - Best for census matching and calibration
+        
+        For 'starsim' method:
+        - Uses Starsim's native age_data parameter
+        - Sex ratio sampled from overall proportion
+        - Best for modeling demographic uncertainty
+        
+        Examples
+        --------
+        Basic usage with exact matching:
+        >>> people = TBPeople.from_demographics('data/south_africa_2020.csv')
+        >>> sim = ss.Sim(people=people, diseases=[mtb.TB()])
+        >>> sim.init()
+        
+        With population scaling:
+        >>> people = TBPeople.from_demographics(
+        ...     'demographics.csv', 
+        ...     scale_factor=0.1,  # 10% of original size
+        ...     method='exact'
+        ... )
+        
+        With distribution sampling:
+        >>> people = TBPeople.from_demographics(
+        ...     'demographics.csv',
+        ...     method='starsim'  # Samples from distributions
+        ... )
+        
+        With custom states:
+        >>> custom = [ss.FloatArr('SES', default=0.0)]
+        >>> people = TBPeople.from_demographics(
+        ...     'demographics.csv',
+        ...     extra_states=custom
+        ... )
+        
+        Complete simulation example:
+        >>> import tbsim as mtb
+        >>> people = mtb.TBPeople.from_demographics('demographics.csv')
+        >>> tb = mtb.TB(pars={'beta': ss.peryear(0.01)})
+        >>> sim = ss.Sim(people=people, diseases=[tb])
+        >>> sim.init()
+        >>> sim.run()
+        
+        Validating demographics:
+        >>> from tbsim.utils.demographics import load_demographic_data, validate_demographics
+        >>> demo_data = load_demographic_data('demographics.csv')
+        >>> people = mtb.TBPeople.from_demographics('demographics.csv')
+        >>> # After initialization
+        >>> validation = validate_demographics(people, demo_data)
+        
+        See Also
+        --------
+        tbsim.utils.demographics.load_demographic_data : Load demographic CSV
+        tbsim.utils.demographics.validate_demographics : Validate population structure
+        tbsim.utils.demographics.create_people_from_demographics : Low-level function
+        """
+        from .utils.demographics import create_people_from_demographics
+        
+        # Use the utility function to create the people object
+        people = create_people_from_demographics(
+            filepath=filepath,
+            n_agents=n_agents,
+            scale_factor=scale_factor,
+            method=method,
+            people_class=cls,
+            extra_states=extra_states,
+            **kwargs
+        )
+        
+        return people
+    
+    def link_sim(self, sim, init=False):
+        """
+        Override link_sim to apply exact demographics if needed.
+        
+        This method is called during sim.init(). If the TBPeople was created
+        using from_demographics() with method='exact', this applies the
+        stored age/sex arrays.
+        """
+        # Call parent link_sim first
+        super().link_sim(sim, init=init)
+        
+        # If we have stored demographic data from 'exact' method, apply it
+        if hasattr(self, '_demographic_method') and self._demographic_method == 'exact':
+            if hasattr(self, '_demographic_ages') and hasattr(self, '_demographic_sexes'):
+                # This will be applied during init_vals
+                pass  # Ages/sexes are applied in init_vals override
+        
+        return
+    
+    def init_vals(self):
+        """
+        Override init_vals to apply exact demographics if needed.
+        
+        This method is called during initialization. If the TBPeople was created
+        using from_demographics() with method='exact', this applies the stored
+        age/sex arrays after the parent initialization.
+        """
+        # Call parent init_vals first
+        super().init_vals()
+        
+        # Apply exact demographics if available
+        if hasattr(self, '_demographic_method') and self._demographic_method == 'exact':
+            if hasattr(self, '_demographic_ages') and hasattr(self, '_demographic_sexes'):
+                self.age[:] = self._demographic_ages
+                self.female[:] = self._demographic_sexes
+                # Clean up temporary storage
+                delattr(self, '_demographic_ages')
+                delattr(self, '_demographic_sexes')
+        
+        return
