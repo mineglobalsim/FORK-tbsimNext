@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from enum import IntEnum
+from types import SimpleNamespace
 
 __all__ = ['TB_LSHTM', 'TB_LSHTM_Acute', 'TBSL']
 
@@ -38,6 +39,37 @@ class TBSL(IntEnum):
         return np.array([TBSL.SYMPTOMATIC])
 
 
+def _get_rate_from_base(base_rate):
+    # Get underlying scipy dist (ss.expon uses scale=1/rate, so rate=1/scale)
+    dist = getattr(base_rate, 'dist', None)
+    if dist is None:
+        raise AttributeError('base_rate has no .dist')
+    # Prefer scale from kwds, else from args
+    scale = getattr(dist, 'kwds', {}).get('scale')
+    if scale is None:
+        scale = getattr(dist, 'args', (None,))[0]
+    if scale is None or scale <= 0:
+        raise ValueError('Cannot get rate from base_rate: missing or invalid scale')
+    return 1.0 / scale
+
+
+def make_scaled_rate(base_rate, rr_callable):
+    def sample_waiting_times(uids):
+        # Per-agent rate ratio from callable (e.g. rr_activation[uids]); rr_i=0 => never transition
+        rr = np.asarray(rr_callable(uids), dtype=float)
+        n = len(uids)
+        # Base rate = 1/scale from expon; effective_rate_i = base * rr_i
+        base_rate_val = _get_rate_from_base(base_rate)
+        effective_rate = base_rate_val * rr
+        # Inverse-transform: u ~ U(0,1) => T = -log(u)/λ ~ Exp(λ)
+        u = base_rate.rand(n)
+        # rr=0 => div by 0; set t=inf (never transition), suppress warnings
+        with np.errstate(divide='ignore', invalid='ignore'):
+            t = np.where(rr > 0, -np.log(u) / effective_rate, np.inf)
+        return t
+    return SimpleNamespace(sample_waiting_times=sample_waiting_times)
+
+
 class TB_LSHTM(ss.Infection):
     #region IDE Collapsable section for documentation
     """
@@ -57,7 +89,7 @@ class TB_LSHTM(ss.Infection):
     Only ASYMPTOMATIC and SYMPTOMATIC are infectious; force of infection uses :attr:`pars.beta`
     and :attr:`pars.kappa` (relative infectiousness of ASYMPTOMATIC). Per-agent rate modifiers
     ``rr_activation`` (latent→active), ``rr_clearance`` (NON_INFECTIOUS→RECOVERED), and
-    ``rr_death`` (SYMPTOMATIC→DEAD) scale the corresponding base rates; see :class:`TB_LSHTM._ScaledRate`.
+    ``rr_death`` (SYMPTOMATIC→DEAD) scale the corresponding base rates; see :func:`make_scaled_rate`.
     Treatment initiation from interventions is via :meth:`start_treatment` (latent→CLEARED,
     active→TREATMENT).
 
@@ -154,25 +186,6 @@ class TB_LSHTM(ss.Infection):
     and a population (e.g. :class:`starsim.People`) to run simulations.
     """
     #endregion Documentation
-    
-    class _ScaledRate:
-        """
-        Wrapper that multiplies a base rate by a per-agent factor for transition sampling.
-
-        For exponential waiting time T ~ Exp(λ), using T_eff = T / rr gives
-        effective rate λ * rr. So .rvs(uids) returns base_rate.rvs(uids) / rr_slice,
-        with rr_slice indexed to match uids (same length). Used to apply rr_activation,
-        rr_clearance, and rr_death in TB_LSHTM.
-        """
-        def __init__(self, base_rate, rr_slice):
-            self.base_rate = base_rate
-            self.rr_slice = np.asarray(rr_slice, dtype=float)
-
-        def rvs(self, uids):
-            draw = self.base_rate.rvs(uids)
-            rr = self.rr_slice
-            # Avoid division by zero: rr=0 => never transition (infinite waiting time)
-            return np.where(rr > 0, draw / rr, np.inf)
 
     def __init__(self, pars=None, **kwargs):
         """
@@ -298,8 +311,8 @@ class TB_LSHTM(ss.Infection):
         # rr_activation multiplies the infection-to-active rates (inf_non, inf_asy).
         self.state_next[uids], self.ti_next[uids] = self.transition(uids, to={
             TBSL.CLEARED: self.pars.inf_cle,
-            TBSL.NON_INFECTIOUS: TB_LSHTM._ScaledRate(self.pars.inf_non, self.rr_activation[uids]),
-            TBSL.ASYMPTOMATIC: TB_LSHTM._ScaledRate(self.pars.inf_asy, self.rr_activation[uids]),
+            TBSL.NON_INFECTIOUS: make_scaled_rate(self.pars.inf_non, lambda uids: self.rr_activation[uids]),
+            TBSL.ASYMPTOMATIC: make_scaled_rate(self.pars.inf_asy, lambda uids: self.rr_activation[uids]),
         })
 
         return
@@ -318,9 +331,9 @@ class TB_LSHTM(ss.Infection):
         uids : array-like
             Agent indices to transition.
         to : dict
-            Mapping from TBSL state -> rate (e.g. ``ss.expon``-based). Keys are
-            possible next states; values are callables that return a sample of
-            waiting time (e.g. ``rate.rvs(uids)``).
+            Mapping from TBSL state -> rate-like. Keys are possible next states;
+            values provide waiting times per agent via the object returned by :func:`make_scaled_rate` (``.sample_waiting_times(uids)``)
+            or (Starsim dists) ``.rvs(uids)``.
 
         Returns
         -------
@@ -344,7 +357,8 @@ class TB_LSHTM(ss.Infection):
         # One row per possible destination; column j = transition time for uids[j]
         ti_state = np.zeros((len(to), len(uids)))
         for idx, rate in enumerate(to.values()):
-            ti_state[idx, :] = ti + rate.rvs(uids)
+            draw = rate.sample_waiting_times(uids) if hasattr(rate, 'sample_waiting_times') else rate.rvs(uids)
+            ti_state[idx, :] = ti + draw
 
         # Soonest transition wins (index into keys gives next state)
         state_next_idx = ti_state.argmin(axis=0)
@@ -420,14 +434,14 @@ class TB_LSHTM(ss.Infection):
         u = uids[self.state[uids] == TBSL.INFECTION]
         self.state_next[u], self.ti_next[u] = self.transition(u, to={
             TBSL.CLEARED: self.pars.inf_cle,
-            TBSL.NON_INFECTIOUS: TB_LSHTM._ScaledRate(self.pars.inf_non, self.rr_activation[u]), 
-            TBSL.ASYMPTOMATIC: TB_LSHTM._ScaledRate(self.pars.inf_asy, self.rr_activation[u]),
+            TBSL.NON_INFECTIOUS: make_scaled_rate(self.pars.inf_non, lambda uids: self.rr_activation[uids]),
+            TBSL.ASYMPTOMATIC: make_scaled_rate(self.pars.inf_asy, lambda uids: self.rr_activation[uids]),
         })
 
         # rr_clearance: NON_INFECTIOUS → RECOVERED (non-infectious-to-recovered)
         u = uids[self.state[uids] == TBSL.NON_INFECTIOUS]
         self.state_next[u], self.ti_next[u] = self.transition(u, to={
-            TBSL.RECOVERED: TB_LSHTM._ScaledRate(self.pars.non_rec, self.rr_clearance[u]),
+            TBSL.RECOVERED: make_scaled_rate(self.pars.non_rec, lambda uids: self.rr_clearance[uids]),
             TBSL.ASYMPTOMATIC: self.pars.non_asy,
         })
 
@@ -443,7 +457,7 @@ class TB_LSHTM(ss.Infection):
         self.state_next[u], self.ti_next[u] = self.transition(u, to={
             TBSL.ASYMPTOMATIC: self.pars.sym_asy,
             TBSL.TREATMENT: self.pars.theta,
-            TBSL.DEAD: TB_LSHTM._ScaledRate(self.pars.mu_tb, self.rr_death[u]),
+            TBSL.DEAD: make_scaled_rate(self.pars.mu_tb, lambda uids: self.rr_death[uids]),
         })
 
         # TREATMENT → SYMPTOMATIC (failure) or TREATED (completion)
@@ -454,7 +468,7 @@ class TB_LSHTM(ss.Infection):
         })
 
         # CLEARED, RECOVERED, TREATED: no scheduled transition; reinfection via transmission only
-        
+
         # Reset rate multipliers states to 1
         self.rr_activation[uids] = 1
         self.rr_clearance[uids] = 1
@@ -774,14 +788,14 @@ class TB_LSHTM_Acute(TB_LSHTM):
         u = uids[self.state[uids] == TBSL.INFECTION]
         self.state_next[u], self.ti_next[u] = self.transition(u, to={
             TBSL.CLEARED: self.pars.inf_cle,
-            TBSL.NON_INFECTIOUS: TB_LSHTM._ScaledRate(self.pars.inf_non, self.rr_activation[u]),
-            TBSL.ASYMPTOMATIC: TB_LSHTM._ScaledRate(self.pars.inf_asy, self.rr_activation[u]),
+            TBSL.NON_INFECTIOUS: make_scaled_rate(self.pars.inf_non, lambda uids: self.rr_activation[uids]),
+            TBSL.ASYMPTOMATIC: make_scaled_rate(self.pars.inf_asy, lambda uids: self.rr_activation[uids]),
         })
 
         # NON_INFECTIOUS → RECOVERED or ASYMPTOMATIC
         u = uids[self.state[uids] == TBSL.NON_INFECTIOUS]
         self.state_next[u], self.ti_next[u] = self.transition(u, to={
-            TBSL.RECOVERED: TB_LSHTM._ScaledRate(self.pars.non_rec, self.rr_clearance[u]),
+            TBSL.RECOVERED: make_scaled_rate(self.pars.non_rec, lambda uids: self.rr_clearance[uids]),
             TBSL.ASYMPTOMATIC: self.pars.non_asy,
         })
 
@@ -797,7 +811,7 @@ class TB_LSHTM_Acute(TB_LSHTM):
         self.state_next[u], self.ti_next[u] = self.transition(u, to={
             TBSL.ASYMPTOMATIC: self.pars.sym_asy,
             TBSL.TREATMENT: self.pars.theta,
-            TBSL.DEAD: TB_LSHTM._ScaledRate(self.pars.mu_tb, self.rr_death[u]),
+            TBSL.DEAD: make_scaled_rate(self.pars.mu_tb, lambda uids: self.rr_death[uids]),
         })
 
         # TREATMENT → SYMPTOMATIC (failure) or TREATED (completion)

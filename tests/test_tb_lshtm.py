@@ -10,6 +10,7 @@ import numpy as np
 import starsim as ss
 import tbsim as mtb
 from tbsim import TB_LSHTM, TB_LSHTM_Acute, TBSL
+from tbsim.tb_lshtm import make_scaled_rate
 
 
 def make_lshtm_sim(
@@ -144,39 +145,60 @@ def test_tb_lshtm_acute_infectious():
     assert not tb.infectious.any()
 
 
-# --- _ScaledRate ---
+# --- make_scaled_rate ---
 
 
 def test_scaled_rate_positive_rr():
-    """_ScaledRate with rr > 0 scales waiting time (finite values)."""
+    """make_scaled_rate with rr > 0 scales waiting time (finite values)."""
     sim = make_lshtm_sim(agents=5)
     sim.init()
     tb = sim.diseases[0]
     # Use an already-initialized rate from the model (inf_cle)
     base = tb.pars.inf_cle
     rr = np.array([1.0, 2.0, 0.5, 1.0, 1.0], dtype=float)
-    scaled = TB_LSHTM._ScaledRate(base, rr)
+    scaled = make_scaled_rate(base, lambda uids: rr)
     uids = ss.uids(np.arange(5))
-    t = scaled.rvs(uids)
+    t = scaled.sample_waiting_times(uids)
     assert t.shape == (5,)
     assert np.all(t >= 0)
     assert np.all(np.isfinite(t))
 
 
 def test_scaled_rate_zero_rr():
-    """_ScaledRate with rr=0 returns inf (never transition)."""
+    """make_scaled_rate with rr=0 returns inf (never transition)."""
     sim = make_lshtm_sim(agents=3)
     sim.init()
     tb = sim.diseases[0]
     base = tb.pars.inf_cle
     rr = np.array([0.0, 1.0, 0.0], dtype=float)
-    scaled = TB_LSHTM._ScaledRate(base, rr)
+    scaled = make_scaled_rate(base, lambda uids: rr)
     uids = ss.uids([0, 1, 2])
     with np.errstate(divide="ignore"):  # intentional divide-by-zero -> inf
-        t = scaled.rvs(uids)
+        t = scaled.sample_waiting_times(uids)
     assert t[0] == np.inf
     assert t[2] == np.inf
     assert np.isfinite(t[1])
+
+
+def test_scaled_rate_mean_waiting_time():
+    """make_scaled_rate with rr=1 has mean waiting time 1/λ; with rr=2, mean ≈ 1/(2λ)."""
+    from tbsim.tb_lshtm import _get_rate_from_base
+    sim = make_lshtm_sim(agents=500, pars={"init_prev": ss.bernoulli(0)})
+    sim.init(seed=42)
+    tb = sim.diseases[0]
+    base = tb.pars.inf_cle
+    lam = _get_rate_from_base(base)
+    uids = ss.uids(np.arange(500))
+    # rr=1: mean T should be 1/lam
+    scaled1 = make_scaled_rate(base, lambda uids: np.ones(len(uids)))
+    draws1 = [scaled1.sample_waiting_times(uids) for _ in range(200)]
+    mean1 = np.mean(draws1)
+    assert 0.8 / lam <= mean1 <= 1.2 / lam, f"mean T with rr=1 should be ~1/λ={1/lam}, got {mean1}"
+    # rr=2: mean T should be 1/(2*lam)
+    scaled2 = make_scaled_rate(base, lambda uids: np.full(len(uids), 2.0))
+    draws2 = [scaled2.sample_waiting_times(uids) for _ in range(200)]
+    mean2 = np.mean(draws2)
+    assert 0.8 / (2 * lam) <= mean2 <= 1.2 / (2 * lam), f"mean T with rr=2 should be ~1/(2λ)={1/(2*lam)}, got {mean2}"
 
 
 # --- transition() ---
