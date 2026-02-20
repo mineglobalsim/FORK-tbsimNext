@@ -9,9 +9,11 @@ release = '0.5.0'
 
 extensions = [
     'sphinx.ext.autodoc',
+    'sphinx.ext.autosummary',
     'sphinx.ext.napoleon',
     'sphinx.ext.viewcode',
     'sphinx.ext.intersphinx',
+    'sphinxcontrib.mermaid',
     'sphinx_copybutton',
     'sphinx_design',
     'nbsphinx',
@@ -215,6 +217,9 @@ napoleon_custom_sections = None
 napoleon_use_keyword = True
 napoleon_attr_annotations = True
 
-# Additional autodoc settings for scripts
+# Autosummary: generate API stubs from code at build time
+autosummary_generate = True
+
+# Additional autodoc settings
 autodoc_ignore_module_all = True
-autodoc_preserve_defaults = True 
+autodoc_preserve_defaults = True
